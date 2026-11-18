@@ -481,7 +481,23 @@ function Enter-RamLinux {
         $out = Get-Content $outFile -Raw
         Write-Log $out
         if ($out -match 'Received FIP') {
-            Say (T 'BL2 and the OpenWrt U-Boot are loaded into RAM.' 'BL2 и OpenWrt U-Boot загружены в RAM.')
+            Say (T 'BL2 and the OpenWrt U-Boot are loaded into RAM. UART log follows (Ctrl+C to abort the script).' 'BL2 и OpenWrt U-Boot загружены в RAM. Лог UART ниже (Ctrl+C — прервать скрипт).')
+            # The U-Boot in RAM takes over the console; echo its output so the
+            # user sees what the router is doing until ssh is up.
+            try {
+                $sp = [IO.Ports.SerialPort]::new($ComPort, 115200, 'None', 8, 'One')
+                $sp.ReadTimeout = 500
+                $sp.Open()
+                $deadline = (Get-Date).AddSeconds(90)
+                while ((Get-Date) -lt $deadline) {
+                    try {
+                        $line = $sp.ReadLine()
+                        Write-Host ('  uart| ' + $line)
+                        Write-Log ('uart: ' + $line)
+                    } catch [TimeoutException] { }
+                }
+                $sp.Close()
+            } catch { Write-Log "uart echo unavailable: $($_.Exception.Message)" }
             return
         }
         Warn (T 'no bootrom handshake: power on the router while the tool is running, retrying' 'bootrom handshake не пойман: включайте роутер, пока работает утилита, повторяю')
@@ -651,6 +667,13 @@ function Invoke-Install {
         # OpenWrt is already installed: upgrade with sysupgrade (it writes the
         # production volume safely), no GPT/BL2/FIP writes are needed.
         Say (T 'OpenWrt is already installed - upgrading with sysupgrade...' 'OpenWrt уже установлен — обновляюсь через sysupgrade...')
+        Say (T 'Backing up the currently flashed system first...' 'Сначала бэкаплю текущую зашитую систему...')
+        Backup-Region 'current-gpt.img' 'dd if=/dev/mmcblk0 bs=512 count=34' (34 * 512) $BackupDir
+        Backup-Region 'current-bl2-boot0.img' 'dd if=/dev/mmcblk0boot0 bs=512' 4194304 $BackupDir
+        Backup-Region 'current-fip.img' 'dd if=/dev/mmcblk0 bs=512 skip=13312 count=4096' (4096 * 512) $BackupDir
+        # the running kernel + rootfs FIT, as exposed by fitblk
+        $fitBytes = [long]((Invoke-Ssh 'cat /sys/block/fit0/size' 30).Out.Trim()) * 512
+        Backup-Region 'current-fit0.img' 'dd if=/dev/fit0 bs=512' $fitBytes $BackupDir
         Invoke-Scp @($sys)
         $null = Invoke-Ssh "sysupgrade -v /tmp/$(Split-Path $sys -Leaf)" 900
         Say (T 'Rebooting into the upgraded OpenWrt...' 'Перезагружаюсь в обновлённый OpenWrt...')
