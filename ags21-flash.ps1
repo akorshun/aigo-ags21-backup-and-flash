@@ -570,16 +570,6 @@ function Invoke-Backup([string]$outDir, [switch]$RefuseOpenWrt) {
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
     Initialize-Ssh $outDir
 
-    # If a flashed OpenWrt answers at the router address, refuse right away:
-    # the stock partitions are gone, there is nothing to back up. On stock the
-    # router is at a different address and does not answer - go through the
-    # UART boot and check the layout from the initramfs.
-    Say (T 'Probing the router over ssh (up to 3 s)...' 'Опрашиваю роутер по ssh (до 3 с)...')
-    $r = Invoke-Ssh 'true' 10 -NoFail
-    if ($r -and $r.ExitCode -eq 0 -and ((Test-GptLayout) -eq 'openwrt')) {
-        Fail (T 'OpenWrt is already flashed (the GPT has no stock partitions) - there is nothing to back up. A backup must be taken from the stock firmware.' 'OpenWrt уже прошит (в GPT нет стоковых разделов) — бэкапировать нечего. Бэкап снимается только со стока.')
-    }
-
     Enter-Initramfs
 
     # The authoritative layout check, from the running initramfs: with the
