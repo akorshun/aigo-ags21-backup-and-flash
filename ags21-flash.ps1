@@ -426,7 +426,7 @@ function ConvertTo-Arg([string]$a) {
 
 function Invoke-Ssh([string]$cmd, [int]$timeout = 60, [string]$OutFile = $null, [switch]$Echo, [switch]$NoFail) {
     $known = Join-Path $SshDir '.known_hosts'
-    $argStr = 'user@host -o StrictHostKeyChecking=no -o UserKnownHostsFile=' + $known + ' -o ConnectTimeout=8 ' + (ConvertTo-Arg $cmd)
+    $argStr = 'user@host -o StrictHostKeyChecking=no -o UserKnownHostsFile=' + $known + ' -o ConnectTimeout=3 ' + (ConvertTo-Arg $cmd)
     $argStr = $argStr.Replace('user@host', "root@$RouterIp")
     Write-Log "ssh $cmd"
     $r = [AgsProc]::Run($script:SshExePath, $argStr, $null, $OutFile, [bool]$Echo, $timeout * 1000)
@@ -574,6 +574,7 @@ function Invoke-Backup([string]$outDir) {
     # the stock partitions are gone, there is nothing to back up. On stock the
     # router is at a different address and does not answer - go through the
     # UART boot and check the layout from the initramfs.
+    Say (T 'Probing the router over ssh (up to 3 s)...' 'Опрашиваю роутер по ssh (до 3 с)...')
     $r = Invoke-Ssh 'true' 10 -NoFail
     if ($r -and $r.ExitCode -eq 0 -and ((Test-GptLayout) -eq 'openwrt')) {
         Fail (T 'OpenWrt is already flashed (the GPT has no stock partitions) - there is nothing to back up. A backup must be taken from the stock firmware.' 'OpenWrt уже прошит (в GPT нет стоковых разделов) — бэкапировать нечего. Бэкап снимается только со стока.')
@@ -619,6 +620,7 @@ function Invoke-Install {
     # sysupgrade: no backup of stock partitions exists any more, and writing
     # the production volume with dd while running from it is unsafe.
     $flashed = $false
+    Say (T 'Probing the router over ssh (up to 3 s)...' 'Опрашиваю роутер по ssh (до 3 с)...')
     $r = Invoke-Ssh 'true' 10 -NoFail
     if ($r -and $r.ExitCode -eq 0) {
         $flashed = ((Test-GptLayout) -eq 'openwrt')
