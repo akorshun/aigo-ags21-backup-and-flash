@@ -1,0 +1,4 @@
+backup/
+tmp/
+ags21-flash-*.log
+*.log.err
