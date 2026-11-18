@@ -566,7 +566,7 @@ function Enter-Initramfs {
     }
 }
 
-function Invoke-Backup([string]$outDir) {
+function Invoke-Backup([string]$outDir, [switch]$RefuseOpenWrt) {
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
     Initialize-Ssh $outDir
 
@@ -582,8 +582,15 @@ function Invoke-Backup([string]$outDir) {
 
     Enter-Initramfs
 
+    # The authoritative layout check, from the running initramfs: with the
+    # OpenWrt GPT there are no stock partitions to back up. Backup mode refuses,
+    # Install mode returns the layout so the caller takes the sysupgrade path.
     if ((Test-GptLayout) -eq 'openwrt') {
-        Fail (T 'OpenWrt is already flashed (the GPT has no stock partitions) - there is nothing to back up. A backup must be taken from the stock firmware.' 'OpenWrt уже прошит (в GPT нет стоковых разделов) — бэкапировать нечего. Бэкап снимается только со стока.')
+        if ($RefuseOpenWrt) {
+            Fail (T 'OpenWrt is already flashed (the GPT has no stock partitions) - there is nothing to back up. A backup must be taken from the stock firmware.' 'OpenWrt уже прошит (в GPT нет стоковых разделов) — бэкапировать нечего. Бэкап снимается только со стока.')
+        }
+        Warn (T 'OpenWrt is already flashed - skipping the stock backup.' 'OpenWrt уже прошит — бэкап стока пропускается.')
+        return 'openwrt'
     }
 
     Say (T 'Backing up the important stock partitions (the 56 GiB permanent_config data partition is skipped).' 'Снимаю важные разделы стока (раздел данных permanent_config на 56 ГиБ пропускается).')
@@ -626,8 +633,9 @@ function Invoke-Install {
         $flashed = ((Test-GptLayout) -eq 'openwrt')
     }
 
+    $layout = 'stock'
     if (-not $flashed) {
-        Invoke-Backup $BackupDir
+        $layout = Invoke-Backup $BackupDir
     }
 
     Write-Host ''
@@ -649,7 +657,7 @@ function Invoke-Install {
         if (-not ($r -and $r.ExitCode -eq 0)) { Enter-Initramfs }
     }
 
-    if ($flashed -or ((Test-GptLayout) -eq 'openwrt')) {
+    if ($flashed -or ($layout -eq 'openwrt')) {
         # OpenWrt is already installed: upgrade with sysupgrade (it writes the
         # production volume safely), no GPT/BL2/FIP writes are needed.
         Say (T 'OpenWrt is already installed - upgrading with sysupgrade...' 'OpenWrt уже установлен — обновляюсь через sysupgrade...')
@@ -802,7 +810,7 @@ try {
         'Install' { Invoke-Install }
         'Backup'  {
             if (-not $BackupDir) { $BackupDir = Join-Path $Root ('backup\' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
-            Invoke-Backup $BackupDir
+            Invoke-Backup $BackupDir -RefuseOpenWrt
             Say (T 'Rebooting into the stock firmware...' 'Перезагружаюсь в сток...')
             $null = Invoke-Ssh 'sync; sleep 1; reboot' 30 -NoFail
             Say (T 'Done.' 'Готово.')
