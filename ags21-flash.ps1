@@ -527,6 +527,23 @@ function Backup-Region([string]$name, [string]$ddCmd, [long]$bytes, [string]$out
     Info (T "${name} backed up, sha256 ok ($localHash)" "${name} снят, sha256 ок ($localHash)")
 }
 
+# Is the router running from RAM (initramfs) or from the flashed system?
+function Test-Initramfs {
+    $r = Invoke-Ssh 'ubus call system board | grep -q initramfs' 30 -NoFail
+    return ($r -and $r.ExitCode -eq 0)
+}
+
+# Which GPT is on the eMMC: stock (kernel/rootfs/permanent_config) or OpenWrt
+# (production/recovery)? Returns 'stock', 'openwrt' or 'unknown'.
+function Test-GptLayout {
+    $tmp = Join-Path $SshDir 'gpt.txt'
+    $null = Invoke-Ssh "dd if=/dev/mmcblk0 bs=512 skip=1 count=32 2>/dev/null | strings" 60 -OutFile $tmp
+    $txt = Get-Content $tmp -Raw
+    if ($txt -match 'permanent_config') { return 'stock' }
+    if ($txt -match 'production') { return 'openwrt' }
+    return 'unknown'
+}
+
 function Get-FactoryMac([string]$rawBackup) {
     $fs = [IO.File]::OpenRead($rawBackup)
     try {
@@ -552,6 +569,15 @@ function Enter-Initramfs {
 function Invoke-Backup([string]$outDir) {
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
     Initialize-Ssh $outDir
+
+    # The stock partitions only exist while the stock GPT is in place. If OpenWrt
+    # is already flashed, there is nothing to back up - refuse rather than store
+    # OpenWrt volumes under stock names.
+    $layout = Test-GptLayout
+    if ($layout -eq 'openwrt') {
+        Fail (T 'OpenWrt is already flashed (the GPT has no stock partitions) - there is nothing to back up. A backup must be taken from the stock firmware.' 'OpenWrt уже прошит (в GPT нет стоковых разделов) — бэкапировать нечего. Бэкап снимается только со стока.')
+    }
+
     Enter-Initramfs
 
     Say (T 'Backing up the important stock partitions (the 56 GiB permanent_config data partition is skipped).' 'Снимаю важные разделы стока (раздел данных permanent_config на 56 ГиБ пропускается).')
@@ -593,33 +619,43 @@ function Invoke-Install {
     }
 
     Initialize-Ssh $BackupDir
-    # the initramfs session from the backup phase is still alive; if not, re-enter it
+    # the session from the backup phase is still alive; if not, re-enter it
     $r = Invoke-Ssh 'true' 15 -NoFail
     if (-not ($r -and $r.ExitCode -eq 0)) { Enter-Initramfs }
 
-    Say (T 'Uploading the OpenWrt images to /tmp...' 'Загружаю образы OpenWrt в /tmp...')
-    Invoke-Scp @((Join-Path $FwDir $Files.Gpt), (Join-Path $FwDir $Files.Preloader),
-        (Join-Path $FwDir $Files.Fip), $sys)
-    foreach ($f in @($Files.Gpt, $Files.Preloader, $Files.Fip, (Split-Path $sys -Leaf))) {
-        $null = Invoke-Ssh "test -f /tmp/$f" 30
+    if ((Test-GptLayout) -eq 'openwrt') {
+        # OpenWrt is already installed: upgrade with sysupgrade (it writes the
+        # production volume safely), no GPT/BL2/FIP writes are needed.
+        Say (T 'OpenWrt is already installed - upgrading with sysupgrade...' 'OpenWrt уже установлен — обновляюсь через sysupgrade...')
+        Invoke-Scp @($sys)
+        $null = Invoke-Ssh "sysupgrade -v /tmp/$(Split-Path $sys -Leaf)" 900
+        Say (T 'Rebooting into the upgraded OpenWrt...' 'Перезагружаюсь в обновлённый OpenWrt...')
+        Start-Sleep -Seconds (Scale 10)
+    } else {
+        Say (T 'Uploading the OpenWrt images to /tmp...' 'Загружаю образы OpenWrt в /tmp...')
+        Invoke-Scp @((Join-Path $FwDir $Files.Gpt), (Join-Path $FwDir $Files.Preloader),
+            (Join-Path $FwDir $Files.Fip), $sys)
+        foreach ($f in @($Files.Gpt, $Files.Preloader, $Files.Fip, (Split-Path $sys -Leaf))) {
+            $null = Invoke-Ssh "test -f /tmp/$f" 30
+        }
+        Info (T 'uploaded' 'загружено')
+
+        Say (T 'Writing the OpenWrt GPT (sectors 0-33)...' 'Пишу GPT OpenWrt (сектора 0-33)...')
+        $null = Invoke-Ssh "dd if=/tmp/$($Files.Gpt) of=/dev/mmcblk0 bs=512 conv=notrunc" 120
+        Say (T 'Writing BL2 to the eMMC boot partition...' 'Пишу BL2 в boot-раздел eMMC...')
+        $null = Invoke-Ssh 'echo 0 > /sys/block/mmcblk0boot0/force_ro && dd if=/tmp/emmc-preloader.bin of=/dev/mmcblk0boot0 bs=512 && sync && echo 1 > /sys/block/mmcblk0boot0/force_ro' 120
+        Say (T 'Writing the bl31-uboot FIP (sector 13312)...' 'Пишу bl31-uboot FIP (сектор 13312)...')
+        $null = Invoke-Ssh "dd if=/tmp/$($Files.Fip) of=/dev/mmcblk0 bs=512 seek=$($L.FipFirst) conv=notrunc" 120
+        Say (T 'Writing the sysupgrade FIT to the production volume (sector 131072)...' 'Пишу sysupgrade FIT в том production (сектор 131072)...')
+        $null = Invoke-Ssh "dd if=/tmp/$(Split-Path $sys -Leaf) of=/dev/mmcblk0 bs=512 seek=$($L.Production) conv=notrunc" 300
+        $null = Invoke-Ssh 'sync' 60
+
+        Say (T 'Verifying by reading back...' 'Проверяю чтением обратно...')
+        Test-FlashRegion '/dev/mmcblk0' 0 (Join-Path $FwDir $Files.Gpt)
+        Test-FlashRegion '/dev/mmcblk0boot0' 0 (Join-Path $FwDir $Files.Preloader)
+        Test-FlashRegion '/dev/mmcblk0' $L.FipFirst (Join-Path $FwDir $Files.Fip)
+        Test-FlashRegion '/dev/mmcblk0' $L.Production $sys
     }
-    Info (T 'uploaded' 'загружено')
-
-    Say (T 'Writing the OpenWrt GPT (sectors 0-33)...' 'Пишу GPT OpenWrt (сектора 0-33)...')
-    $null = Invoke-Ssh "dd if=/tmp/$($Files.Gpt) of=/dev/mmcblk0 bs=512 conv=notrunc" 120
-    Say (T 'Writing BL2 to the eMMC boot partition...' 'Пишу BL2 в boot-раздел eMMC...')
-    $null = Invoke-Ssh 'echo 0 > /sys/block/mmcblk0boot0/force_ro && dd if=/tmp/emmc-preloader.bin of=/dev/mmcblk0boot0 bs=512 && sync && echo 1 > /sys/block/mmcblk0boot0/force_ro' 120
-    Say (T 'Writing the bl31-uboot FIP (sector 13312)...' 'Пишу bl31-uboot FIP (сектор 13312)...')
-    $null = Invoke-Ssh "dd if=/tmp/$($Files.Fip) of=/dev/mmcblk0 bs=512 seek=$($L.FipFirst) conv=notrunc" 120
-    Say (T 'Writing the sysupgrade FIT to the production volume (sector 131072)...' 'Пишу sysupgrade FIT в том production (сектор 131072)...')
-    $null = Invoke-Ssh "dd if=/tmp/$(Split-Path $sys -Leaf) of=/dev/mmcblk0 bs=512 seek=$($L.Production) conv=notrunc" 300
-    $null = Invoke-Ssh 'sync' 60
-
-    Say (T 'Verifying by reading back...' 'Проверяю чтением обратно...')
-    Test-FlashRegion '/dev/mmcblk0' 0 (Join-Path $FwDir $Files.Gpt)
-    Test-FlashRegion '/dev/mmcblk0boot0' 0 (Join-Path $FwDir $Files.Preloader)
-    Test-FlashRegion '/dev/mmcblk0' $L.FipFirst (Join-Path $FwDir $Files.Fip)
-    Test-FlashRegion '/dev/mmcblk0' $L.Production $sys
 
     Say (T 'Rebooting into OpenWrt...' 'Перезагружаюсь в OpenWrt...')
     $null = Invoke-Ssh 'sync; sleep 1; reboot' 30 -NoFail
@@ -670,6 +706,20 @@ function Invoke-Restore {
     $tmpDir = Join-Path $Root ('tmp\' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
     New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
     Initialize-Ssh $tmpDir
+
+    if (Test-Ssh 2) {
+        # OpenWrt is running from flash: with a saved environment the RAM U-Boot
+        # would boot it again instead of the TFTP recovery. Wipe the environment
+        # so the U-Boot falls back to the default one (TFTP loop).
+        if ((Test-GptLayout) -eq 'openwrt') {
+            Say (T 'Erasing the U-Boot environment so the recovery TFTP loop starts...' 'Стираю окружение U-Boot, чтобы начался TFTP-цикл recovery...')
+            $null = Invoke-Ssh 'dd if=/dev/zero of=/dev/mmcblk0 bs=512 seek=8192 count=1024 && sync' 60
+        }
+        Say (T 'Rebooting...' 'Перезагружаюсь...')
+        $null = Invoke-Ssh 'sync; sleep 1; reboot' 30 -NoFail
+        Start-Sleep -Seconds (Scale 10)
+    }
+
     Enter-Initramfs
 
     Say (T 'Uploading the stock images...' 'Загружаю образы стока...')
