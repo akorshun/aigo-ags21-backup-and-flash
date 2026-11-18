@@ -481,23 +481,7 @@ function Enter-RamLinux {
         $out = Get-Content $outFile -Raw
         Write-Log $out
         if ($out -match 'Received FIP') {
-            Say (T 'BL2 and the OpenWrt U-Boot are loaded into RAM. UART log follows (Ctrl+C to abort the script).' 'BL2 и OpenWrt U-Boot загружены в RAM. Лог UART ниже (Ctrl+C — прервать скрипт).')
-            # The U-Boot in RAM takes over the console; echo its output so the
-            # user sees what the router is doing until ssh is up.
-            try {
-                $sp = [IO.Ports.SerialPort]::new($ComPort, 115200, 'None', 8, 'One')
-                $sp.ReadTimeout = 500
-                $sp.Open()
-                $deadline = (Get-Date).AddSeconds(90)
-                while ((Get-Date) -lt $deadline) {
-                    try {
-                        $line = $sp.ReadLine()
-                        Write-Host ('  uart| ' + $line)
-                        Write-Log ('uart: ' + $line)
-                    } catch [TimeoutException] { }
-                }
-                $sp.Close()
-            } catch { Write-Log "uart echo unavailable: $($_.Exception.Message)" }
+            Say (T 'BL2 and the OpenWrt U-Boot are loaded into RAM.' 'BL2 и OpenWrt U-Boot загружены в RAM.')
             return
         }
         Warn (T 'no bootrom handshake: power on the router while the tool is running, retrying' 'bootrom handshake не пойман: включайте роутер, пока работает утилита, повторяю')
@@ -575,11 +559,39 @@ function Get-FactoryMac([string]$rawBackup) {
 # ---------------------------------------------------------------------------
 function Enter-Initramfs {
     Enter-RamLinux
-    # The OpenWrt U-Boot in RAM has the default environment: boot_tftp_forever
-    # fetches the recovery image from the PC and boots it. Just wait for ssh.
-    if (-not (Test-Ssh 4)) {
-        Fail (T 'the initramfs did not come up. Check that the router LAN port is connected to the PC and try again' 'initramfs не поднялся. Проверьте, что LAN-порт роутера соединён с ПК, и попробуйте ещё раз')
+    # The OpenWrt U-Boot in RAM boots (default environment: TFTP recovery loop,
+    # or the saved environment: the installed system). Echo the serial console
+    # while polling for ssh, so the user sees every step until the system is up.
+    Say (T 'Waiting for the router to boot; UART log follows, polling ssh...' 'Жду загрузку роутера; ниже лог UART, параллельно опрашиваю ssh...')
+    $sp = $null
+    try {
+        $sp = [IO.Ports.SerialPort]::new($ComPort, 115200, 'None', 8, 'One')
+        $sp.ReadTimeout = 200
+        $sp.Open()
+    } catch { Write-Log "uart echo unavailable: $($_.Exception.Message)"; $sp = $null }
+
+    $deadline = (Get-Date).AddMinutes(6)
+    $up = $false
+    while ((Get-Date) -lt $deadline) {
+        # drain whatever the router printed since the last poll
+        if ($sp) {
+            try {
+                while ($true) {
+                    $line = $sp.ReadLine()
+                    Write-Host ('  uart| ' + $line)
+                    Write-Log ('uart: ' + $line)
+                }
+            } catch [TimeoutException] { } catch { }
+        }
+        $r = Invoke-Ssh 'true' 8 -NoFail
+        if ($r -and $r.ExitCode -eq 0) { $up = $true; break }
+        Start-Sleep -Seconds (Scale 2)
     }
+    if ($sp) { try { $sp.Close() } catch { } }
+    if (-not $up) {
+        Fail (T 'the router did not come up. Check that the LAN cable is between the router and the PC; see the UART log above' 'роутер не поднялся. Проверьте LAN-кабель между роутером и ПК; смотрите лог UART выше')
+    }
+    Say (T 'Router is reachable over ssh.' 'Роутер доступен по ssh.')
 }
 
 function Invoke-Backup([string]$outDir, [switch]$RefuseOpenWrt) {
