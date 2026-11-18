@@ -463,14 +463,13 @@ function Test-Ssh([int]$minutes) {
 # The user power-cycles the router while the tool listens for the bootrom handshake.
 function Enter-RamLinux {
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        Say (T ("Attempt {0} of 3. Power OFF the router now (unplug power)." -f $attempt) ("Попытка {0} из 3. Сейчас выключите роутер (отключите питание)." -f $attempt))
-        Start-Sleep -Seconds (Scale 2)
+        Say (T ("Attempt {0} of 3." -f $attempt) ("Попытка {0} из 3." -f $attempt))
         $ub = Join-Path $Root 'tools\mtk_uartboot.exe'
         $bl2 = Join-Path $FwDir $Files.RamBl2
         $fip = Join-Path $FwDir $Files.Fip
         $argStr = "-s $ComPort -p " + (ConvertTo-Arg $bl2) + ' -f ' + (ConvertTo-Arg $fip) + ' -a'
         Write-Log "mtk_uartboot $argStr"
-        Say (T 'Starting mtk_uartboot. Power ON the router within 30 seconds...' 'Запускаю mtk_uartboot. Включите роутер в течение 30 секунд...')
+        Say (T 'mtk_uartboot is listening. If the router is running - unplug its power and plug it back in; if it is off - plug it in now.' 'mtk_uartboot ждёт. Если роутер работает - вытащите питание и вставьте обратно; если выключен - просто включите сейчас.')
         $outFile = Join-Path $SshDir ("uartboot-$attempt.log")
         $p = Start-Process -FilePath $ub -ArgumentList $argStr -NoNewWindow -PassThru `
             -RedirectStandardOutput $outFile -RedirectStandardError "$outFile.err"
