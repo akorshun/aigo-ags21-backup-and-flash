@@ -641,14 +641,26 @@ function Invoke-Install {
     New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
     Initialize-Ssh $BackupDir
 
-    # If a flashed OpenWrt answers at the router address, upgrade it with
-    # sysupgrade: no backup of stock partitions exists any more, and writing
-    # the production volume with dd while running from it is unsafe.
+    # If a flashed OpenWrt answers (or comes up when powered on), upgrade it
+    # with sysupgrade: no UART boot is needed on an installed router, and the
+    # initramfs detour would only fight the hardware watchdog. The UART boot
+    # path is for the stock firmware, which has no ssh at all.
     $flashed = $false
     Say (T 'Probing the router over ssh (up to 3 s)...' 'Опрашиваю роутер по ssh (до 3 с)...')
     $r = Invoke-Ssh 'true' 10 -NoFail
+    if (-not ($r -and $r.ExitCode -eq 0)) {
+        Say (T 'Router is not answering. If it is OFF - just power it on now (on an installed OpenWrt no UART boot is needed).' 'Роутер не отвечает. Если он выключен - просто включите питание (на прошитом OpenWrt UART-загрузка не нужна).')
+        for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds (Scale 5)
+            $r = Invoke-Ssh 'true' 10 -NoFail
+            if ($r -and $r.ExitCode -eq 0) { break }
+        }
+    }
     if ($r -and $r.ExitCode -eq 0) {
         $flashed = ((Test-GptLayout) -eq 'openwrt')
+        if ($flashed) {
+            Say (T 'Flashed OpenWrt detected - sysupgrade path.' 'Обнаружен прошитый OpenWrt — путь через sysupgrade.')
+        }
     }
 
     $layout = 'stock'
