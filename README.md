@@ -48,6 +48,18 @@ the script tells you when to power-cycle the router.
 
 `Install` requires admin rights (netsh + firewall rule for the TFTP port).
 
+## Root on the stock firmware without disassembly
+
+`python make_cfg.py <password>` generates `config_<password>.dat` - a
+config backup that the stock web UI ("备份恢复 → 恢复配置/恢复备份")
+accepts and applies. The stock firmware decrypts backups with a fixed
+AES-128-CBC key and untars them over the root filesystem, so the crafted
+backup replaces `/etc/shadow` with the chosen root password. After the
+router reboots, SSH/telnet to 192.168.8.1 as root works, and the OpenWrt
+images can be written with dd right from the stock system (see the
+device install instructions in the OpenWrt commit message). Pure Python
+3 stdlib, no dependencies.
+
 ## What ends up on the eMMC
 
 | OpenWrt GPT | Sectors | Content |
